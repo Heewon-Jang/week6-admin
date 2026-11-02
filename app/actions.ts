@@ -4,6 +4,8 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { createClient, requireSuperadmin } from "@/lib/supabase/server";
 import { describeImage, writeCaptions } from "@/lib/gemini";
+import { getResource, parseRow } from "@/lib/resources";
+import { startRequest } from "@/lib/observability";
 
 export type FormState = { error?: string; message?: string };
 
@@ -30,19 +32,34 @@ export async function createMedia(_prev: FormState, formData: FormData): Promise
   const hint = String(formData.get("hint") ?? "").trim().slice(0, MAX_HINT_LENGTH) || undefined;
   const count = Math.min(10, Math.max(1, Number(formData.get("count")) || 5));
 
+  const run = await startRequest(supabase, "photo");
+  const fail = async (message: string) => {
+    await run.fail(message);
+    return { error: message };
+  };
+
   let step1, step2;
   try {
-    step1 = await describeImage(base64, mimeType, hint);
-    step2 = await writeCaptions({ base64, mimeType }, step1.description, { count, hint });
+    step1 = await run.step(
+      1,
+      () => describeImage(base64, mimeType, hint),
+      (r) => ({ prompt: r.prompt, model: r.model, response: r.description })
+    );
+    const description = step1.description;
+    step2 = await run.step(
+      2,
+      () => writeCaptions({ base64, mimeType }, description, { count, hint }),
+      (r) => ({ prompt: r.prompt, model: r.model, response: JSON.stringify(r.captions, null, 2) })
+    );
   } catch (error) {
-    return { error: `Couldn't caption that image: ${(error as Error).message}` };
+    return fail(`Couldn't caption that image: ${(error as Error).message}`);
   }
 
   const path = `${user.id}/${crypto.randomUUID()}.jpg`;
   const { error: uploadError } = await supabase.storage
     .from("images")
     .upload(path, Buffer.from(base64, "base64"), { contentType: mimeType });
-  if (uploadError) return { error: uploadError.message };
+  if (uploadError) return fail(uploadError.message);
 
   const {
     data: { publicUrl },
@@ -60,7 +77,7 @@ export async function createMedia(_prev: FormState, formData: FormData): Promise
     })
     .select("id")
     .single();
-  if (imageError) return { error: imageError.message };
+  if (imageError) return fail(imageError.message);
 
   const { error: captionError } = await supabase.from("captions").insert(
     step2.captions.map((text) => ({
@@ -70,7 +87,8 @@ export async function createMedia(_prev: FormState, formData: FormData): Promise
       model: step2.model,
     }))
   );
-  if (captionError) return { error: captionError.message };
+  if (captionError) return fail(captionError.message);
+  await run.finish(image.id);
 
   revalidatePath("/", "layout");
   redirect(`/media#image-${image.id}`);
@@ -120,6 +138,56 @@ export async function deleteCaption(captionId: number): Promise<FormState> {
   if (!data?.length) return { error: "Nothing was deleted. Check the admin RLS policies." };
 
   revalidatePath("/", "layout");
+  return {};
+}
+
+// Generic CREATE / UPDATE / DELETE for the tables listed in lib/resources.ts.
+function resourceOrThrow(slug: string, op: "create" | "update" | "delete") {
+  const resource = getResource(slug);
+  if (!resource?.can[op]) throw new Error("That isn't allowed here.");
+  return resource;
+}
+
+export async function createRow(slug: string, formData: FormData): Promise<FormState> {
+  const { supabase } = await requireSuperadmin();
+  try {
+    const resource = resourceOrThrow(slug, "create");
+    const { error } = await supabase.from(resource.table).insert(parseRow(resource, formData));
+    if (error) return { error: error.message };
+  } catch (error) {
+    return { error: (error as Error).message };
+  }
+  revalidatePath(`/data/${slug}`);
+  return { message: "Added." };
+}
+
+export async function updateRow(slug: string, id: number, formData: FormData): Promise<FormState> {
+  const { supabase } = await requireSuperadmin();
+  try {
+    const resource = resourceOrThrow(slug, "update");
+    const row = parseRow(resource, formData);
+    if (resource.fields.some((f) => f.key === "updated_at")) row.updated_at = new Date().toISOString();
+    const { data, error } = await supabase.from(resource.table).update(row).eq("id", id).select("id");
+    if (error) return { error: error.message };
+    if (!data?.length) return { error: "Nothing was updated. Check the admin RLS policies." };
+  } catch (error) {
+    return { error: (error as Error).message };
+  }
+  revalidatePath(`/data/${slug}`);
+  return { message: "Saved." };
+}
+
+export async function deleteRow(slug: string, id: number): Promise<FormState> {
+  const { supabase } = await requireSuperadmin();
+  try {
+    const resource = resourceOrThrow(slug, "delete");
+    const { data, error } = await supabase.from(resource.table).delete().eq("id", id).select("id");
+    if (error) return { error: error.message };
+    if (!data?.length) return { error: "Nothing was deleted. Check the admin RLS policies." };
+  } catch (error) {
+    return { error: (error as Error).message };
+  }
+  revalidatePath(`/data/${slug}`);
   return {};
 }
 
