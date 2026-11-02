@@ -142,6 +142,21 @@ export async function deleteCaption(captionId: number): Promise<FormState> {
 }
 
 // Generic CREATE / UPDATE / DELETE for the tables listed in lib/resources.ts.
+
+// Postgres error codes -> messages an admin can act on.
+function friendlyError(error: { code?: string; message: string }) {
+  switch (error.code) {
+    case "23505":
+      return "That already exists.";
+    case "23503":
+      return "Other rows still use this one. Delete or change those first.";
+    case "23514":
+      return "That value isn't allowed (check the format or range).";
+    default:
+      return error.message;
+  }
+}
+
 function resourceOrThrow(slug: string, op: "create" | "update" | "delete") {
   const resource = getResource(slug);
   if (!resource?.can[op]) throw new Error("That isn't allowed here.");
@@ -153,7 +168,7 @@ export async function createRow(slug: string, formData: FormData): Promise<FormS
   try {
     const resource = resourceOrThrow(slug, "create");
     const { error } = await supabase.from(resource.table).insert(parseRow(resource, formData));
-    if (error) return { error: error.message };
+    if (error) return { error: friendlyError(error) };
   } catch (error) {
     return { error: (error as Error).message };
   }
@@ -168,7 +183,7 @@ export async function updateRow(slug: string, id: number, formData: FormData): P
     const row = parseRow(resource, formData);
     if (resource.fields.some((f) => f.key === "updated_at")) row.updated_at = new Date().toISOString();
     const { data, error } = await supabase.from(resource.table).update(row).eq("id", id).select("id");
-    if (error) return { error: error.message };
+    if (error) return { error: friendlyError(error) };
     if (!data?.length) return { error: "Nothing was updated. Check the admin RLS policies." };
   } catch (error) {
     return { error: (error as Error).message };
@@ -182,7 +197,7 @@ export async function deleteRow(slug: string, id: number): Promise<FormState> {
   try {
     const resource = resourceOrThrow(slug, "delete");
     const { data, error } = await supabase.from(resource.table).delete().eq("id", id).select("id");
-    if (error) return { error: error.message };
+    if (error) return { error: friendlyError(error) };
     if (!data?.length) return { error: "Nothing was deleted. Check the admin RLS policies." };
   } catch (error) {
     return { error: (error as Error).message };

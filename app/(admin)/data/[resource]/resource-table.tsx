@@ -70,12 +70,17 @@ function ResourceRow({ slug, row, refs }: { slug: string; row: Row; refs: Refs }
   const id = Number(row.id);
   const formId = `edit-${slug}-${id}`;
 
-  const save = (formData: FormData) =>
+  // onSubmit rather than action: React resets a form after its action runs,
+  // which would wipe the user's edits when the save fails.
+  const save = (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    const formData = new FormData(e.currentTarget);
     startTransition(async () => {
       const result = await updateRow(slug, id, formData);
       setError(result.error ?? "");
       if (!result.error) setEditing(false);
     });
+  };
 
   const remove = () => {
     if (!confirm(`Delete this row from ${resource.title}?`)) return;
@@ -98,7 +103,7 @@ function ResourceRow({ slug, row, refs }: { slug: string; row: Row; refs: Refs }
       ))}
       {(resource.can.update || resource.can.delete) && (
         <td className="px-3 py-2">
-          <form id={formId} action={save} className="flex flex-wrap justify-end gap-2">
+          <form id={formId} onSubmit={save} className="flex flex-wrap justify-end gap-2">
             {editing ? (
               <>
                 {/* Keys stop React reusing the Edit button as Save mid-click, which would submit. */}
@@ -144,17 +149,20 @@ function CreateForm({ slug, fields, refs }: { slug: string; fields: Field[]; ref
   const [formKey, setFormKey] = useState(0);
   const [pending, startTransition] = useTransition();
 
-  const add = (formData: FormData) =>
+  const add = (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    const formData = new FormData(e.currentTarget);
     startTransition(async () => {
       const result = await createRow(slug, formData);
       setStatus(result);
       if (!result.error) setFormKey((k) => k + 1);
     });
+  };
 
   return (
     <form
       key={formKey}
-      action={add}
+      onSubmit={add}
       className="space-y-3 rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-900"
     >
       <p className="text-sm font-semibold">Add new</p>
